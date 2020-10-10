@@ -8,7 +8,10 @@ import uuid
 from po.GroupHistory import GroupHistory
 from po.PanoHistory import PanoHistory
 import time
-
+import coordTransform_utils as coo
+import psycopg2.extras
+from psycopg2.pool import SimpleConnectionPool
+from contextlib import contextmanager
 
 headers = {
     'User-Agent':'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/57.0.2987.133 Safari/537.36'
@@ -24,11 +27,30 @@ class PanoType(Enum):
 
 # 获得数据库连接
 def getConn():
-    return psycopg2.connect(database="postgres", user="postgres", password="zhang002508", host="localhost", port="5432")
+    return connPool.getconn()
+
+# 获得游标
+@contextmanager
+def get_cursor():
+    con = connPool.getconn()
+    # 默认就自动提交
+    con.autocommit = True
+    try:
+        yield con.cursor()
+        # 或设置手动提交 con.commit()
+    finally:
+        # 用完放回连接池
+        connPool.putconn(con)
 
 def getDataGroupByPanoId(panoid):
+    time_start=time.time()
+    
     request2 = getRequestResult(panoid)
-    return request2ToDataGroup(request2)
+    time_end=time.time()
+    print('get request --- {0}'.format(time_end - time_start))
+
+    dataGroup = request2ToDataGroup(request2)
+    return dataGroup
 
 # 获得请求数据
 def getRequestResult(panoid):
@@ -73,18 +95,21 @@ def request2ToDataGroup(request):
 
     # 处理pano数据
     panoObjs = []
-    line = [] # 路段数据
+    lineMKT = [] # 路段数据
+    lineWGS84 = []
     for i in range(len(panos)):
         pano = panos[i]
         panoObj = None
         if(i != curIndex):
             panoObj = parsePano(pano)
             panoObj.rid = roadId
-            line.append([panoObj.x,panoObj.y])
+            lineMKT.append([panoObj.x / 100, panoObj.y / 100])
+            lineWGS84.append(coo.MKT_to_WGS84(panoObj.x / 100, panoObj.y / 100))
             panoObjs.append(panoObj)
         else:
             panoObj = parsePano(pano,pano_cur)
-            line.append([panoObj.x,panoObj.y])
+            lineMKT.append([panoObj.x / 100, panoObj.y / 100])
+            lineWGS84.append(coo.MKT_to_WGS84(panoObj.x / 100, panoObj.y / 100))
             panoObjs.append(panoObj)
         # 判断是否为端点
         if(i == 0 or i == len(panos) - 1):
@@ -97,7 +122,8 @@ def request2ToDataGroup(request):
     roadObj.name = roadName
     roadObj.from_pid = panos[0]['PID']
     roadObj.to_pid = panos[len(panos) - 1]["PID"]
-    roadObj.line = line
+    roadObj.lineMKT = lineMKT
+    roadObj.lineWGS84 = lineWGS84
     dataGroup.roadFragment = roadObj
 
     # 处理历史数据
@@ -186,118 +212,95 @@ def getPanoIndex(panoid,panos):
 # --------------------------------   DAO   --------------------------------------------------------
 # 插入非当前请求点的同路段的其他点
 def insertPano_simple(pano):
-    conn = getConn()
+    wgs = coo.MKT_to_WGS84(pano.x / 100,pano.y /100)
+    with get_cursor() as cur:
+        cur.execute('''INSERT INTO public.pano_current(
+        pid, rid, geom_mkt, geom_wgs84, type, time_group_id, isnode, "order", isendpoint)
+        VALUES (%s ,%s, ST_GeomFromText('POINT(%s %s)',4326), ST_GeomFromText('POINT(%s %s)',4326), %s, %s, %s ,%s, %s);'''
+        ,(pano.pid,pano.rid,pano.x / 100,pano.y /100,wgs[0],wgs[1],pano.type,pano.timeGroupId,
+        pano.isnode, pano.order,pano.isendpoint))
 
-    cur = conn.cursor()
-    cur.execute('''INSERT INTO public.pano_current(
-	pid, rid, geom, type, time_group_id, isnode, "order", isendpoint)
-	VALUES (%s ,%s, ST_GeomFromText('POINT(%s %s)',4326),  %s, %s, %s ,%s, %s);'''
-    ,(pano.pid,pano.rid,pano.x,pano.y ,pano.type,pano.timeGroupId,
-    pano.isnode, pano.order,pano.isendpoint))
-
-    conn.commit()
-    conn.close()
-    recordPano(pano.pid)
-    showProcess()
+        recordPano(pano.pid)
+        showProcess()
 
 
 def insertPano(pano):
-    conn = getConn()
-
-    cur = conn.cursor()
-    cur.execute('''INSERT INTO public.pano_current(
-	pid, rid, geom, "time", heading, pitch, type, isnode,time_group_id, "order",isendpoint)
-	VALUES (%s, %s,ST_GeomFromText('POINT(%s %s)',4326), %s, %s, %s, %s, %s, %s,%s, %s);'''
-    ,(pano.pid,pano.rid,pano.x,pano.y,pano.time,pano.heading,pano.pitch
-            ,pano.type,pano.isnode, pano.timeGroupId,pano.order,pano.isendpoint))
-
-    conn.commit()
-    conn.close()
+    wgs = coo.MKT_to_WGS84(pano.x / 100,pano.y /100)
+    with get_cursor() as cur:
+        cur.execute('''INSERT INTO public.pano_current(
+        pid, rid, geom_mkt,geom_wgs84, "time", heading, pitch, type, isnode,time_group_id, "order",isendpoint)
+        VALUES (%s, %s,ST_GeomFromText('POINT(%s %s)',4326), ST_GeomFromText('POINT(%s %s)',4326),%s, %s, %s, %s, %s, %s,%s, %s);'''
+        ,(pano.pid,pano.rid,pano.x / 100,pano.y /100,wgs[0],wgs[1],pano.time,pano.heading,pano.pitch
+                ,pano.type,pano.isnode, pano.timeGroupId,pano.order,pano.isendpoint))
     recordPano(pano.pid)
     showProcess()
 
 
 def insertPanoHis(pid,time,time_group_id):
-    conn = getConn()
+    with get_cursor() as cur:
+        cur.execute('''INSERT INTO public.pano_history(
+        pid, "time", time_group_id)
+        VALUES (%s, %s, %s);''',(pid,time,time_group_id))
 
-    cur = conn.cursor()
-    cur.execute('''INSERT INTO public.pano_history(
-	pid, "time", time_group_id)
-	VALUES (%s, %s, %s);''',(pid,time,time_group_id))
-
-    conn.commit()
-    conn.close()
 
 def insertGroupHistory(gid, count, current_time, current_pid):
-    conn = getConn()
+    with get_cursor() as cur:
+        cur.execute('''INSERT INTO public.group_history(
+        gid, count, "current_time", current_pid)
+        VALUES (%s, %s, %s, %s);''',(gid, count, current_time, current_pid))
 
-    cur = conn.cursor()
-    cur.execute('''INSERT INTO public.group_history(
-	gid, count, "current_time", current_pid)
-	VALUES (%s, %s, %s, %s);''',(gid, count, current_time, current_pid))
 
-    conn.commit()
-    conn.close()
+def insertRoadFragment(rid, from_pid, to_pid, lineMKT,lineWGS84, name):
 
-def insertRoadFragment(rid, from_pid, to_pid, line, name):
-    conn = getConn()
-    strlist = map(lambda x: '{0} {1}'.format(x[0], x[1]) , line)
-    wktLineString = ','.join(strlist)
-    if(len(line) != 1):
-        wktLineString = 'LINESTRING({0})'.format(wktLineString)
+    # 转换MKT坐标为WKT格式
+    strlistMKT = map(lambda x: '{0} {1}'.format(x[0], x[1]) , lineMKT)
+    wktLineStringMKT = ','.join(strlistMKT)
+    if(len(lineMKT) != 1):
+        wktLineStringMKT = 'LINESTRING({0})'.format(wktLineStringMKT)
     else:
-        wktLineString = 'LINESTRING({0},{0})'.format(wktLineString)
-    
-    cur = conn.cursor()
-    cur.execute('''INSERT INTO public.road_fragment(
-	rid, from_pid, to_pid, geom, name)
-	VALUES (%s, %s, %s, ST_GeomFromText(%s,4326), %s);''',(rid, from_pid, to_pid, wktLineString, name))
+        wktLineStringMKT = 'LINESTRING({0},{0})'.format(wktLineStringMKT)
 
-    conn.commit()
-    conn.close()
+    strlistWGS84 = map(lambda x: '{0} {1}'.format(x[0], x[1]) , lineWGS84)
+    wktLineStringWGS84 = ','.join(strlistWGS84)
+    if(len(lineMKT) != 1):
+        wktLineStringWGS84 = 'LINESTRING({0})'.format(wktLineStringWGS84)
+    else:
+        wktLineStringWGS84 = 'LINESTRING({0},{0})'.format(wktLineStringWGS84)
 
-    recordRoad(rid)
+    with get_cursor() as cur:
+        cur.execute('''INSERT INTO public.road_fragment(
+        rid, from_pid, to_pid, geom_mkt,geom_wgs84, name)
+        VALUES (%s, %s, %s, ST_GeomFromText(%s,4326), ST_GeomFromText(%s,4326), %s);''',
+        (rid, from_pid, to_pid, wktLineStringMKT, wktLineStringWGS84, name))
+
+
+        recordRoad(rid)
 
 def insertTopo(tid, pid1, pid2, rid1, rid2):
-    conn = getConn()
+    with get_cursor() as cur:
+        cur.execute('''INSERT INTO public.road_fragment_topo(
+        tid, pid1, pid2, rid1, rid2)
+        VALUES (%s, %s, %s, %s, %s);''',(tid, pid1, pid2, rid1, rid2))
 
-    cur = conn.cursor()
-    cur.execute('''INSERT INTO public.road_fragment_topo(
-	tid, pid1, pid2, rid1, rid2)
-	VALUES (%s, %s, %s, %s, %s);''',(tid, pid1, pid2, rid1, rid2))
-
-    conn.commit()
-    conn.close()
-    recordTopo(pid1,pid2)
+        recordTopo(pid1,pid2)
 
 def listPanos():
-    conn = getConn()
+    with get_cursor() as cur:
+        cur.execute('''SELECT pid FROM public.pano_current''')
+        records = cur.fetchall()
+        return records
 
-    cur = conn.cursor()
-    cur.execute('''SELECT pid FROM public.pano_current''')
-    records = cur.fetchall()
-
-    conn.close()
-    return records
 def listTopos():
-    conn = getConn()
-
-    cur = conn.cursor()
-    cur.execute('''SELECT pid1, pid2 FROM public.road_fragment_topo''')
-    records = cur.fetchall()
-
-    conn.close()
-    return records
+    with get_cursor() as cur:
+        cur.execute('''SELECT pid1, pid2 FROM public.road_fragment_topo''')
+        records = cur.fetchall()
+        return records
 
 def listRoads():
-    conn = getConn()
-
-    cur = conn.cursor()
-    cur.execute('''SELECT rid FROM public.road_fragment;''')
-    records = cur.fetchall()
-
-    conn.close()
-    return records
+    with get_cursor() as cur:
+        cur.execute('''SELECT rid FROM public.road_fragment;''')
+        records = cur.fetchall()
+        return records
 
 # ------------- service -----------------------------
 def savePanos(panos,curIndex):
@@ -314,12 +317,12 @@ def savePanos(panos,curIndex):
 def saveRoad(road):
     if(road.rid in roadmap.keys()):
         return False
-    insertRoadFragment(road.rid,road.from_pid,road.to_pid,road.line,road.name)
+    insertRoadFragment(road.rid,road.from_pid,road.to_pid,road.lineMKT,road.lineWGS84,road.name)
     return True
 
 def saveLinks(links):
     for topo in links:
-        key = '{0} - {1}'.format(topo.pid1,topo.pid2)
+        # key = '{0} - {1}'.format(topo.pid1,topo.pid2)
         # if(key in topomap.keys()):
         #     return False
         insertTopo(topo.tid,topo.pid1,topo.pid2,topo.rid1,topo.rid2)
@@ -331,8 +334,11 @@ def saveHisGroup(hisGroup):
 
 # ---------------  main  ----------------------------
 def requestPano(current_panoid):
-    
+    time_start=time.time()
+
     dataGroup = getDataGroupByPanoId(current_panoid)
+    curPano = dataGroup.panos[dataGroup.panoCurIndex]
+    inBound(curPano.x / 100, curPano.y / 100, bound[0], bound[1], bound[2], bound[3])
 
     if(dataGroup.locType == PanoType.MIDDLE):
         # 保存panos
@@ -390,6 +396,9 @@ def requestPano(current_panoid):
         # 加入队列
         for link in startPanoDataGroup.topo:
             queue.append(link.pid2)
+        
+    time_end=time.time()
+    print('all handler --- {0}'.format(time_end - time_start))
 
 # 队列调度程序，采用广度优先策略
 def dispatch(pid):
@@ -398,15 +407,25 @@ def dispatch(pid):
         requestPano(queue[0])
         queue.pop(0) # 移出队列
 
+def inBound(px,py,left,top,right,bottom):
+    wgs = coo.MKT_to_WGS84(px,py)
+    x = wgs[0]
+    y = wgs[1]
+    if(x >= left or x <= right or y <= top or y >= bottom):
+        return True
+    return False
 
 # 记录并每隔100条展示进度
 def showProcess():
     if(record['panoCount'] % 100 == 0):
+        cur_time = time.time()
         print(''' {0} -- pano \n
                   {1} -- road,\n
                   {2} -- topo \n
+                  cost time --- {3} \n
                   --------------  '''
-                  .format(record['panoCount'],record['roadCount'],record['topoCount']))
+                  .format(record['panoCount'],record['roadCount'],record['topoCount'],cur_time - last_time[0]))
+        last_time[0] = cur_time
 
 def recordPano(pid):
     panomap[pid] = 1 # 插入记录
@@ -421,6 +440,8 @@ def recordTopo(pid1,pid2):
     topomap['{1} - {0}'.format(pid1,pid2)] = 1
     record['topoCount'] += 1
 
+def initTime():
+    last_time.append(time.time())
 
 def initMap():
     # 初始化panomap
@@ -439,6 +460,20 @@ def initMap():
         topomap['{0} - {1}'.format(record[0],record[1])] = 1
         topomap['{1} - {0}'.format(record[0],record[1])] = 1
 
+# 初始化数据库连接池
+DATABASE_HOST='localhost'
+DATABASE_PORT=5432
+DATABASE_USERNAME='postgres'
+DATABASE_PASSWORD='zhang002508'
+DATABASE_NAME='postgres'
+
+connPool = SimpleConnectionPool(10, 50,
+        host=DATABASE_HOST,
+        port=DATABASE_PORT,
+        user=DATABASE_USERNAME,
+        password=DATABASE_PASSWORD,
+        database=DATABASE_NAME)
+
 # 已经采集的pano记录
 panomap={}
 roadmap={}
@@ -448,17 +483,19 @@ record={
     'roadCount':0,
     'topoCount':0
 }
+last_time=[]
 
 # 入口函数
 def main():
     # 初始化记录容器
     initMap()
-
+    initTime()
     # 执行爬取程序
     initPid = '09000200121905051402166819P'
     # requestPano(initPid) 
     dispatch(initPid)
 
+bound=[114.029877,30.681117,114.512088,30.30495] # left top right bottom
 queue=[]
 
 main()

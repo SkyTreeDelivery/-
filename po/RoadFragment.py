@@ -4,4 +4,5 @@ class RoadFragment:
         self.name = None
         self.from_pid = None
         self.to_pid = None
-        self.line = None
+        self.lineMKT = None
+        self.lineWGS84 = None
