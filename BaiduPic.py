@@ -207,7 +207,7 @@ def getPanoIndex(panoid,panos):
     for i in range(len(panos)):
         if(panoid == panos[i]['PID']):
             return i
-        return -1
+    return -1
 
 # --------------------------------   DAO   --------------------------------------------------------
 # 插入非当前请求点的同路段的其他点
@@ -322,9 +322,9 @@ def saveRoad(road):
 
 def saveLinks(links):
     for topo in links:
-        # key = '{0} - {1}'.format(topo.pid1,topo.pid2)
-        # if(key in topomap.keys()):
-        #     return False
+        key = '{0} - {1}'.format(topo.pid1,topo.pid2)
+        if(key in topomap.keys()):
+            return False
         insertTopo(topo.tid,topo.pid1,topo.pid2,topo.rid1,topo.rid2)
     return True
 
@@ -338,8 +338,8 @@ def requestPano(current_panoid):
 
     dataGroup = getDataGroupByPanoId(current_panoid)
     curPano = dataGroup.panos[dataGroup.panoCurIndex]
-    inBound(curPano.x / 100, curPano.y / 100, bound[0], bound[1], bound[2], bound[3])
-
+    if(not(inBound(curPano.x / 100, curPano.y / 100, bound[0], bound[1], bound[2], bound[3]))):
+        return 
     if(dataGroup.locType == PanoType.MIDDLE):
         # 保存panos
         panos = dataGroup.panos
@@ -371,11 +371,15 @@ def requestPano(current_panoid):
         fp = savePanos(panos,dataGroup.panoCurIndex)
         fr = saveRoad(dataGroup.roadFragment) # 保存道路
 
-        endPanoDataGroup = getDataGroupByPanoId(panos[len(panos) - 1].pid)
+        endPanoDataGroup = None
+        if(len(panos) == 1):
+            endPanoDataGroup = dataGroup
+        else:
+            endPanoDataGroup = getDataGroupByPanoId(panos[len(panos) - 1].pid)
         fl = saveLinks(endPanoDataGroup.topo)
         saveHisGroup(dataGroup.hisGroup)
 
-        if(not(fp and fr and fl)):
+        if(not(fp and fr)):
             return 0
         # 加入队列
         for link in endPanoDataGroup.topo:
@@ -387,11 +391,15 @@ def requestPano(current_panoid):
         fp = savePanos(panos,dataGroup.panoCurIndex)
         fr = saveRoad(dataGroup.roadFragment) # 保存道路
 
-        startPanoDataGroup = getDataGroupByPanoId(panos[0].pid)
+        startPanoDataGroup = None
+        if(len(panos) == 1):
+            startPanoDataGroup = dataGroup
+        else:
+            startPanoDataGroup = getDataGroupByPanoId(panos[0].pid)
         fl = saveLinks(startPanoDataGroup.topo)
         saveHisGroup(dataGroup.hisGroup)
 
-        if(not(fp and fr and fl)):
+        if(not(fp and fr)):
             return 0
         # 加入队列
         for link in startPanoDataGroup.topo:
