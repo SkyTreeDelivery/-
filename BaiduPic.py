@@ -54,17 +54,23 @@ def getDataGroupByPanoId(panoid):
 
 # 获得请求数据
 def getRequestResult(panoid):
-    request2 = re.get('https://mapsv0.bdimg.com',params={
-    'qt':'sdata',
-    'sid':panoid
-    },headers=headers)
+    try:
+         request2 = re.get('https://mapsv0.bdimg.com',params={
+        'qt':'sdata',
+        'sid':panoid
+        },headers=headers)
+    except:
+        print("--- try request again")
+        time.sleep(10)
+        return getRequestResult(panoid)
     return request2
 
 # 将request 2 的结果进行结构化处理
 def request2ToDataGroup(request):
     dataGroup = DataGroup()
-
     json = request.json()
+
+    
     infoJson = json['content'][0]
     panoid = infoJson['ID']
     date = infoJson['Date']
@@ -334,79 +340,89 @@ def saveHisGroup(hisGroup):
 
 # ---------------  main  ----------------------------
 def requestPano(current_panoid):
-    time_start=time.time()
+    try:
+        time_start=time.time()
 
-    dataGroup = getDataGroupByPanoId(current_panoid)
-    curPano = dataGroup.panos[dataGroup.panoCurIndex]
-    if(not(inBound(curPano.x / 100, curPano.y / 100, bound[0], bound[1], bound[2], bound[3]))):
-        return 
-    if(dataGroup.locType == PanoType.MIDDLE):
-        # 保存panos
-        panos = dataGroup.panos
-        fp = savePanos(panos,dataGroup.panoCurIndex)
-        fr = saveRoad(dataGroup.roadFragment) # 保存道路
-        
-        # 获得link数据
-        startPanoDataGroup = getDataGroupByPanoId(panos[0].pid)
-        endPanoDataGroup = getDataGroupByPanoId(panos[len(panos) - 1].pid)
-
-        # 保存道路拓扑
-        fl1 = saveLinks(startPanoDataGroup.topo)
-        fl2 = saveLinks(endPanoDataGroup.topo)
-
-        # 保存历史组数据,暂不处理历史点数据
-        saveHisGroup(dataGroup.hisGroup)
-
-        if(not(fp and fr and fl1 and fl2)):
-            return 0
-        # 加入队列
-        for link in startPanoDataGroup.topo:
-            queue.append(link.pid2)
-        for link in endPanoDataGroup.topo:
-            queue.append(link.pid2)
-
-    elif(dataGroup.locType == PanoType.START):
-         # 保存panos
-        panos = dataGroup.panos
-        fp = savePanos(panos,dataGroup.panoCurIndex)
-        fr = saveRoad(dataGroup.roadFragment) # 保存道路
-
-        endPanoDataGroup = None
-        if(len(panos) == 1):
-            endPanoDataGroup = dataGroup
-        else:
-            endPanoDataGroup = getDataGroupByPanoId(panos[len(panos) - 1].pid)
-        fl = saveLinks(endPanoDataGroup.topo)
-        saveHisGroup(dataGroup.hisGroup)
-
-        if(not(fp and fr)):
-            return 0
-        # 加入队列
-        for link in endPanoDataGroup.topo:
-            queue.append(link.pid2)
-
-    else:
-         # 保存panos
-        panos = dataGroup.panos
-        fp = savePanos(panos,dataGroup.panoCurIndex)
-        fr = saveRoad(dataGroup.roadFragment) # 保存道路
-
-        startPanoDataGroup = None
-        if(len(panos) == 1):
-            startPanoDataGroup = dataGroup
-        else:
+        dataGroup = getDataGroupByPanoId(current_panoid)
+        curPano = dataGroup.panos[dataGroup.panoCurIndex]
+        if(not(inBound(curPano.x / 100, curPano.y / 100, bound[0], bound[1], bound[2], bound[3]))):
+            return 
+        if(dataGroup.locType == PanoType.MIDDLE):
+            # 保存panos
+            panos = dataGroup.panos
+            fr = saveRoad(dataGroup.roadFragment) # 保存道路
+            if (fr == False): return
+            fp = savePanos(panos,dataGroup.panoCurIndex)
+            if (fp == False): return
+            # 获得link数据
             startPanoDataGroup = getDataGroupByPanoId(panos[0].pid)
-        fl = saveLinks(startPanoDataGroup.topo)
-        saveHisGroup(dataGroup.hisGroup)
+            endPanoDataGroup = getDataGroupByPanoId(panos[len(panos) - 1].pid)
 
-        if(not(fp and fr)):
-            return 0
-        # 加入队列
-        for link in startPanoDataGroup.topo:
-            queue.append(link.pid2)
-        
-    time_end=time.time()
-    print('all handler --- {0}'.format(time_end - time_start))
+            # 保存道路拓扑
+            fl1 = saveLinks(startPanoDataGroup.topo)
+            fl2 = saveLinks(endPanoDataGroup.topo)
+
+            # 保存历史组数据,暂不处理历史点数据
+            saveHisGroup(dataGroup.hisGroup)
+
+            # 加入队列
+            for link in startPanoDataGroup.topo:
+                if(not(link.rid2 in roadmap.keys())):
+                    queue.append(link.pid2)
+            for link in endPanoDataGroup.topo:
+                if(not(link.rid2 in roadmap.keys())):
+                    queue.append(link.pid2)
+
+        elif(dataGroup.locType == PanoType.START):
+            # 保存panos
+            panos = dataGroup.panos
+            fr = saveRoad(dataGroup.roadFragment) # 保存道路
+            if (fr == False): return
+            fp = savePanos(panos,dataGroup.panoCurIndex)
+            if (fp == False): return
+
+            endPanoDataGroup = None
+            if(len(panos) == 1):
+                endPanoDataGroup = dataGroup
+            else:
+                endPanoDataGroup = getDataGroupByPanoId(panos[len(panos) - 1].pid)
+            fl = saveLinks(endPanoDataGroup.topo)
+            if(len(panos) != 1 and (not(fl))):
+                return
+            saveHisGroup(dataGroup.hisGroup)
+
+            # 加入队列
+            for link in endPanoDataGroup.topo:
+                if(not(link.rid2 in roadmap.keys())):
+                    queue.append(link.pid2)
+
+        else:
+            # 保存panos
+            panos = dataGroup.panos
+            fr = saveRoad(dataGroup.roadFragment) # 保存道路
+            if (fr == False): return
+            fp = savePanos(panos,dataGroup.panoCurIndex)
+            if (fp == False): return
+
+            startPanoDataGroup = None
+            if(len(panos) == 1):
+                startPanoDataGroup = dataGroup
+            else:
+                startPanoDataGroup = getDataGroupByPanoId(panos[0].pid)
+            fl = saveLinks(startPanoDataGroup.topo)
+            if(len(panos) != 1 and (not(fl))):
+                return
+            saveHisGroup(dataGroup.hisGroup)
+
+            # 加入队列
+            for link in startPanoDataGroup.topo:
+                if(not(link.rid2 in roadmap.keys())):
+                    queue.append(link.pid2)
+            
+            time_end=time.time()
+            print('all handler --- {0}'.format(time_end - time_start))
+    except:
+        return
 
 # 队列调度程序，采用广度优先策略
 def dispatch(pid):
@@ -419,7 +435,7 @@ def inBound(px,py,left,top,right,bottom):
     wgs = coo.MKT_to_WGS84(px,py)
     x = wgs[0]
     y = wgs[1]
-    if(x >= left or x <= right or y <= top or y >= bottom):
+    if(x >= left and x <= right and y <= top and y >= bottom):
         return True
     return False
 
